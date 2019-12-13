@@ -1,0 +1,953 @@
+﻿<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
+    <title>Welcome file</title>
+    <link href="https://stackedit.io/style.css" rel="stylesheet"/>
+</head>
+
+<body class="stackedit">
+<div class="stackedit__html"><h1 id="cs-587-computer-systems-security">CS 587: Computer Systems Security</h1>
+    <h2 id="course-project-authentication-and-authorization-in-microservices-architecture">Course Project:
+        Authentication and Authorization in Microservices Architecture</h2>
+    <h3 id="overview">Overview</h3>
+    <p>Traditionally, user authentication and authorization in monolithic web applications are done by using a unique
+        session identifier that is sent to the user after successful authentication and needs to be passed by her with
+        every request to establish her identity. However, this approach does not work for microservice-based
+        applications. Microservices may be distributed and may have multiple instances of the same service running for
+        better load balancing and higher availability. This means that the subsequent request of the same user, who was
+        authenticated earlier with server <em>X</em>, may be served by a different server <em>Y</em>, which would need
+        to establish the user’s identity again before servicing the request.</p>
+    <p>This project models a <strong>Document Management</strong> system which uses <strong>Role-based Access</strong>
+        to allow users to <em>read and write labeled documents</em> according to their <em>clearance level</em>. The
+        user interacts with the system using a <strong>RESTful API</strong>. This API is <strong>stateless</strong>,
+        meaning no session data and application-state is maintained at the server-side. Instead, application-state is
+        maintained at the client-side with the help of <strong>Java Web Tokens (JWT)</strong>. Since the state is
+        maintained on the client-side and is sent to the server on each request, any application server hosting these
+        services can serve the user’s request after extracting the user details from the JWT token.</p>
+    <p>This project itself does not adhere to the microservices architecture, but it is easy to break it down into
+        separate services and register them with a discovery service to convert it into a set of microservices.</p>
+    <h3 id="document-manager-—-the-example-application">Document Manager — The Example Application</h3>
+    <p>A <strong>document</strong> in the system is represented by the following JSON:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">{</span>
+	<span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">5</span><span class="token punctuation">,</span>
+	<span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document1.txt"</span><span
+                class="token punctuation">,</span>
+	<span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+		<span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">1</span><span class="token punctuation">,</span>
+		<span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Unclassified"</span>
+	<span class="token punctuation">}</span><span class="token punctuation">,</span>
+	<span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"These are the contents of a test document."</span>
+<span class="token punctuation">}</span>
+</code></pre>
+    <p>Each document can be classified with one of the following <strong>labels</strong>:</p>
+    <ul>
+        <li>Unclassified</li>
+        <li>Confidential</li>
+        <li>Secret</li>
+        <li>TopSecret</li>
+    </ul>
+    <p>Each label has a corresponding <strong>read</strong> and <strong>write</strong> permission associated with it.
+        Additionally, <strong>upgrade</strong> and <strong>downgrade</strong> permissions are also defined for all the
+        labels, with an exception of <em>Unclassified</em> (no <em>downgrade</em> permission) and <em>TopSecret</em> (no
+        <em>upgrade</em> permission).</p>
+    <p>Furthermore, a <strong>manageUsers</strong> permission is defined for system admin to manage users.</p>
+    <pre><code>P = {
+	readUnclassified,
+	writeUnclassified,
+	upgradeUnclassified
+	readConfidential,
+	writeConfidential,
+	downgradeConfidential,
+	upgradeConfidential,
+	readSecret,
+	writeSecret,
+	downgradeSecret,
+	upgradeSecret,
+	readTopSecret,
+	writeTopSecret,
+	downgradeTopSecret
+}
+</code></pre>
+    <p>Each label has two kinds of roles defined — <strong>User</strong> and <strong>Admin</strong>, with an exception
+        of <em>Unclassified</em>, which does not have an <em>admin</em> role. Additionally, a
+        <strong>systemAdmin</strong> role has been defined for managin users in the system.</p>
+    <pre><code>R = {
+	unclassifiedUser,
+	confidentialUser,
+	confidentialAdmin,
+	secretUser,
+	secretAdmin,
+	topSecretUser,
+	topSecretAdmin,
+	systemAdmin
+}
+</code></pre>
+    <p>Any <em>user</em> can read all documents below her level, but can only write at his own level. Any <em>admin</em>
+        can can <em>downgrade</em> a document one level down and can also <em>upgrade</em> a document one level above.
+    </p>
+    <pre><code>RP = {
+	[unclassifiedUser, readUnclassified],
+	[unclassifiedUser, writeUnclassified],
+	[confidentialUser, readUnclassified],
+	[confidentialUser, readConfidential],
+	[confidentialUser, writeConfidential],
+	[confidentialAdmin, upgradeUnclassified],
+	[confidentialAdmin, downgradeConfidential],
+	[secretUser, readUnclassified],
+	[secretUser, readConfidential],
+	[secretUser, readSecret],
+	[secretUser, writeSecret],
+	[secretAdmin, upgradeConfidential],
+	[secretAdmin, downgradeSecret],
+	[topSecretUser, readUnclassified],
+	[topSecretUser, readConfidential],
+	[topSecretUser, readSecret],
+	[topSecretUser, readTopSecret],
+	[topSecretUser, writeTopSecret],
+	[topSecretAdmin, upgradeSecret],
+	[topSecretAdmin, downgradeTopSecret],
+	[systemAdmin, manageUsers]
+}
+</code></pre>
+    <p>The users in the system are identified using their <em>E-mail ID</em>. A <code>User</code> object in the Java
+        application is defined as:</p>
+    <pre class=" language-java"><code class="prism  language-java"><span class="token function">User</span><span
+            class="token punctuation">(</span>String firstName<span
+            class="token punctuation">,</span> String lastName<span class="token punctuation">,</span> String email<span
+            class="token punctuation">,</span> String password<span class="token punctuation">,</span> Role<span
+            class="token punctuation">.</span><span class="token punctuation">.</span><span
+            class="token punctuation">.</span> roles<span class="token punctuation">)</span>
+</code></pre>
+    <p>The following users are defined in the application for demo purposes. The assigned roles appear last on each
+        line.</p>
+    <pre class=" language-java"><code class="prism  language-java">var users <span class="token operator">=</span> Arrays<span
+            class="token punctuation">.</span><span class="token function">asList</span><span class="token punctuation">(</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"Unclassified"</span><span
+                class="token punctuation">,</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span> <span class="token string">"unclassified.user@email.com"</span><span
+                class="token punctuation">,</span> password<span
+                class="token punctuation">,</span> unclassifiedUser<span class="token punctuation">)</span><span
+                class="token punctuation">,</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"Confidential"</span><span
+                class="token punctuation">,</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span> <span class="token string">"confidential.user@email.com"</span><span
+                class="token punctuation">,</span> password<span
+                class="token punctuation">,</span> confidentialUser<span class="token punctuation">)</span><span
+                class="token punctuation">,</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"Confidential"</span><span
+                class="token punctuation">,</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span> <span class="token string">"confidential.admin@email.com"</span><span
+                class="token punctuation">,</span> password<span
+                class="token punctuation">,</span> confidentialUser<span class="token punctuation">,</span> confidentialAdmin<span
+                class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"Secret"</span><span
+                class="token punctuation">,</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span> <span class="token string">"secret.user@email.com"</span><span
+                class="token punctuation">,</span> password<span class="token punctuation">,</span> secretUser<span
+                class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"Secret"</span><span
+                class="token punctuation">,</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span> <span class="token string">"secret.admin@email.com"</span><span
+                class="token punctuation">,</span> password<span class="token punctuation">,</span> secretUser<span
+                class="token punctuation">,</span> secretAdmin<span class="token punctuation">)</span><span
+                class="token punctuation">,</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"Top Secret"</span><span
+                class="token punctuation">,</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span> <span class="token string">"top_secret.user@email.com"</span><span
+                class="token punctuation">,</span> password<span class="token punctuation">,</span> topSecretUser<span
+                class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"Top Secret"</span><span
+                class="token punctuation">,</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span> <span class="token string">"top_secret.admin@email.com"</span><span
+                class="token punctuation">,</span> password<span class="token punctuation">,</span> topSecretAdmin<span
+                class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token keyword">new</span> <span class="token class-name">User</span><span
+                class="token punctuation">(</span><span class="token string">"System"</span><span
+                class="token punctuation">,</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span> <span class="token string">"system.admin@email.com"</span><span
+                class="token punctuation">,</span> password<span class="token punctuation">,</span> systemAdmin<span
+                class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre>
+    <p>All passwords are <strong>salted</strong> and one-way <strong>hashed</strong> using the <strong>bcrypt</strong>
+        hashing function. For demo purposes, all demo users have been assigned the password <strong>“test”</strong>.</p>
+    <h3 id="technologies-used">Technologies Used</h3>
+    <ul>
+        <li><a href="https://www.oracle.com/technetwork/java/javase/downloads/jdk11-downloads-5066655.html">Java 11
+            JDK</a></li>
+        <li><a href="https://spring.io/projects/spring-boot">Spring Boot</a></li>
+        <li><a href="https://spring.io/projects/spring-security">Spring Security</a></li>
+        <li><a href="https://jwt.io">Java Web Tokens (JWT)</a></li>
+        <li><a href="https://projectlombok.org/">Lombok</a></li>
+        <li><a href="https://gradle.org/">Gradle Build Tool</a></li>
+    </ul>
+    <h3 id="how-to-run">How to Run</h3>
+    <ol>
+        <li>Extract the project</li>
+        <li>Open <em>terminal</em> and browse to the project directory</li>
+        <li>Build the project and generate the Jar file
+            <pre class=" language-bash"><code class="prism  language-bash">./gradlew clean build bootJar
+</code></pre>
+        </li>
+        <li>Run the jar file using Java
+            <pre class=" language-bash"><code class="prism  language-bash">java -jar build/libs/document-manager-0.0.1-SNAPSHOT.jar
+</code></pre>
+            Alternatively, run directly using Gradle
+            <pre class=" language-bash"><code class="prism  language-bash">./gradlew bootRun
+</code></pre>
+        </li>
+        <li>Use a REST API client, like <strong><a href="https://www.getpostman.com/">Postman</a></strong> or <strong><a
+                href="https://curl.haxx.se/">CURL</a></strong> to interact with the application
+        </li>
+        <li>Press <code>Ctrl</code>+<code>C</code> to shut down the server when done</li>
+    </ol>
+    <h3 id="api-endpoints">API Endpoints</h3>
+    <p>There are three endpoints defined for the demo application:</p>
+    <ol>
+        <li><strong><code>/auth/</code>:</strong> For authenticating users and generating JWT tokens.</li>
+        <li><strong><code>/users/</code>:</strong> For managing users. Can only be accessed by users having the <code>manageUsers</code>
+            permission.
+        </li>
+        <li><strong><code>/documents/</code>:</strong> For creating, reading, updating, deleting, and
+            downgrading/upgrading documents.
+        </li>
+    </ol>
+    <h3 id="authentication-endpoint">Authentication Endpoint</h3>
+    <p>Users needs to authenticate themselves before they are allowed to access any other API endpoint.</p>
+    <p><strong>Example:</strong> <em>Login as a user with “Secret” security clearance.</em></p>
+    <pre class=" language-bash"><code class="prism  language-bash">curl -X POST \
+  http://localhost:8080/auth/ \
+  -H <span class="token string">'Content-Type: application/json'</span> \
+  -d <span class="token string">'{
+	"username": "confidential.user@email.com",
+	"password": "test"
+}'</span>
+</code></pre>
+    <p>If the user is authenticated successfully, the <code>Authorization</code> header in the response will contain the
+        JWT token, that should be provided as a <code>Bearer</code> token for all subsequent queries.</p>
+    <pre><code>Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJjb25maWRlbnRpYWwudXNlckBlbWFpbC5jb20iLCJhdXRob3JpdGllcyI6WyJjb25maWRlbnRpYWxVc2VyIiwicmVhZENvbmZpZGVudGlhbCIsInJlYWRVbmNsYXNzaWZpZWQiLCJ3cml0ZUNvbmZpZGVudGlhbCJdLCJpYXQiOjE1NzYyMjg1MDYsImV4cCI6MTU3NjMxNDkwNn0.qRfR1g5HRsZV_WyEKpSlobCH_e2MYt0_DaDUedbbkQlS4bYwF6RXKp6_2lNk76rAz4rv2BJ8wcpLsr316q18bg
+</code></pre>
+    <p>This JWT token has the following data encoded in it:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">{</span>
+  <span class="token string">"sub"</span><span class="token punctuation">:</span> <span class="token string">"confidential.user@email.com"</span><span
+                class="token punctuation">,</span>
+  <span class="token string">"authorities"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+    <span class="token string">"confidentialUser"</span><span class="token punctuation">,</span>
+    <span class="token string">"readConfidential"</span><span class="token punctuation">,</span>
+    <span class="token string">"readUnclassified"</span><span class="token punctuation">,</span>
+    <span class="token string">"writeConfidential"</span>
+  <span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string">"iat"</span><span class="token punctuation">:</span> <span
+                class="token number">1576228506</span><span class="token punctuation">,</span>
+  <span class="token string">"exp"</span><span class="token punctuation">:</span> <span
+                class="token number">1576314906</span>
+<span class="token punctuation">}</span>
+</code></pre>
+    <p>This JWT token is signed using HMACSHA512 algorithm. The secret key is only known to the authentication service,
+        which validates that the tokens have not been tampered with.</p>
+    <h3 id="users-endpoint">Users Endpoint</h3>
+    <p>The <code>/users/</code> endpoint allows System Admins with <code>manageUsers</code> permission to
+        <em>create</em>, <em>list</em>, <em>modify</em>, and <em>delete</em> users from the application. System Admins
+        can also assign <em>roles</em> to users.</p>
+    <p><em><strong>Example:</strong> List all users (after authenticating as a system admin user)</em></p>
+    <pre class=" language-bash"><code class="prism  language-bash">curl -X GET \
+  http://localhost:8080/users/ \
+  -H <span class="token string">'Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJzeXN0ZW0uYWRtaW5AZW1haWwuY29tIiwiYXV0aG9yaXRpZXMiOlsibWFuYWdlVXNlcnMiLCJzeXN0ZW1BZG1pbiJdLCJpYXQiOjE1NzYyMjkzNjcsImV4cCI6MTU3NjMxNTc2N30.a0KeBL-ZtDcH9U9M9ldb5np6n0x_servsRoxEgxrl7GT2vXh8S7mHuvs1FD0PxSpnagMSNocueLXXq5id7L6Aw'</span>
+  
+</code></pre>
+    <p>Response:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">[</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">17</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"Unclassified"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"unclassified.user@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"unclassifiedUser"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeUnclassified"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeUnclassified"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"Unclassified User"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">18</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"Confidential"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"confidential.user@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"confidentialUser"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeConfidential"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeConfidential"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"Confidential User"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">19</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"Confidential"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"confidential.admin@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"confidentialUser"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeConfidential"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"confidentialAdmin"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"downgradeConfidential"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"upgradeUnclassified"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"upgradeUnclassified"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeConfidential"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"downgradeConfidential"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"Confidential Admin"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">20</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"Secret"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"secret.user@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"secretUser"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readSecret"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeSecret"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeSecret"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readSecret"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"Secret User"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">21</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"Secret"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"secret.admin@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"secretUser"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readSecret"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeSecret"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"secretAdmin"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"downgradeSecret"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"upgradeConfidential"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"upgradeConfidential"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeSecret"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readSecret"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"downgradeSecret"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"Secret Admin"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">22</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"Top Secret"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"User"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"top_secret.user@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"topSecretUser"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readSecret"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readTopSecret"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeTopSecret"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"writeTopSecret"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readTopSecret"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readSecret"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readUnclassified"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"readConfidential"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"Top Secret User"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">23</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"Top Secret"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"top_secret.admin@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"topSecretAdmin"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"downgradeTopSecret"</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"upgradeSecret"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"downgradeTopSecret"</span>
+            <span class="token punctuation">}</span><span class="token punctuation">,</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"upgradeSecret"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"Top Secret Admin"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">24</span><span class="token punctuation">,</span>
+        <span class="token string">"firstName"</span><span class="token punctuation">:</span> <span
+                class="token string">"System"</span><span class="token punctuation">,</span>
+        <span class="token string">"lastName"</span><span class="token punctuation">:</span> <span class="token string">"Admin"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"email"</span><span class="token punctuation">:</span> <span class="token string">"system.admin@email.com"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"password"</span><span class="token punctuation">:</span> <span class="token string">"$2a$10$uSf1wK1Ian2twRJOu4Qkcegi5y4Nlo1H0kssa6yFiugtsfT8F9B4e"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"roles"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"systemAdmin"</span><span class="token punctuation">,</span>
+                <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"manageUsers"</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">]</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"permissions"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">[</span>
+            <span class="token punctuation">{</span>
+                <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token string">"manageUsers"</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">]</span><span class="token punctuation">,</span>
+        <span class="token string">"fullName"</span><span class="token punctuation">:</span> <span class="token string">"System Admin"</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">]</span>
+</code></pre>
+    <h3 id="documents-endpoint">Documents Endpoint</h3>
+    <p>The <code>/documents/</code> endpoint can be used to <em>create</em>, <em>read</em>, <em>list</em>,
+        <em>update</em>, <em>rename</em>, <em>downgrade</em>, and <em>upgrade</em> documents.</p>
+    <p><em><strong>Example:</strong> Listing all documents which can be read by the user.</em></p>
+    <pre class=" language-bash"><code class="prism  language-bash">curl -X GET \
+  http://localhost:8080/documents/ \
+  -H <span class="token string">'Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJzZWNyZXQudXNlckBlbWFpbC5jb20iLCJhdXRob3JpdGllcyI6WyJyZWFkQ29uZmlkZW50aWFsIiwicmVhZFNlY3JldCIsInJlYWRVbmNsYXNzaWZpZWQiLCJzZWNyZXRVc2VyIiwid3JpdGVTZWNyZXQiXSwiaWF0IjoxNTc2MjMwMTQ0LCJleHAiOjE1NzYzMTY1NDR9.1xkxklGauqqzmiPu_JenDYMRhh0EoEDcIeDQHxuO_NFbTL3DGgjN_nxyI0bwMxwqzzG-fINSN2ptk9dl8IlZyA'</span>
+</code></pre>
+    <p>Response:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">[</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">5</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document1.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">1</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Unclassified"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Sapien faucibus et molestie ac feugiat sed lectus. Dictumst quisque sagittis purus sit amet. Mauris augue neque gravida in fermentum. Pretium lectus quam id leo in vitae turpis. Pellentesque massa placerat duis ultricies lacus sed turpis tincidunt. Vitae tempus quam pellentesque nec nam aliquam sem. Leo in vitae turpis massa sed elementum. Nulla porttitor massa id neque aliquam vestibulum morbi blandit. Maecenas accumsan lacus vel facilisis volutpat est velit egestas. Tincidunt augue interdum velit euismod in pellentesque massa placerat duis. Lectus magna fringilla urna porttitor. Fusce ut placerat orci nulla pellentesque dignissim enim sit. Tellus elementum sagittis vitae et leo duis ut diam. Consectetur lorem donec massa sapien."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">6</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document2.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">2</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Confidential"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Mi sit amet mauris commodo quis imperdiet massa tincidunt. Urna nunc id cursus metus aliquam eleifend mi in nulla. Nibh tellus molestie nunc non blandit massa enim. Sagittis purus sit amet volutpat consequat mauris. Vivamus arcu felis bibendum ut tristique et egestas. Cursus risus at ultrices mi tempus imperdiet nulla malesuada pellentesque. Ultrices gravida dictum fusce ut placerat orci nulla. Nulla malesuada pellentesque elit eget gravida cum. Nec feugiat nisl pretium fusce id velit ut tortor pretium. Rhoncus dolor purus non enim praesent elementum facilisis leo vel. Ullamcorper eget nulla facilisi etiam. Gravida quis blandit turpis cursus in hac habitasse platea. Proin fermentum leo vel orci porta non pulvinar. Neque vitae tempus quam pellentesque nec nam. Fermentum dui faucibus in ornare quam viverra orci sagittis."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">7</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document3.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">3</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Secret"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Lobortis scelerisque fermentum dui faucibus in ornare quam viverra orci. Sagittis vitae et leo duis ut diam quam nulla porttitor. Aliquet nec ullamcorper sit amet risus nullam eget felis. Leo vel orci porta non. Sed libero enim sed faucibus turpis in eu. Neque vitae tempus quam pellentesque. Diam in arcu cursus euismod quis viverra nibh. Duis ultricies lacus sed turpis tincidunt id. Egestas pretium aenean pharetra magna ac placerat vestibulum. Penatibus et magnis dis parturient. Leo in vitae turpis massa sed elementum tempus. Arcu felis bibendum ut tristique et egestas quis ipsum suspendisse. Mi ipsum faucibus vitae aliquet nec. Laoreet sit amet cursus sit amet dictum sit amet justo."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">9</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document5.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">1</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Unclassified"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"In massa tempor nec feugiat nisl pretium fusce id velit. Egestas sed sed risus pretium quam vulputate dignissim suspendisse in. At risus viverra adipiscing at in tellus. Porta nibh venenatis cras sed. Tempor id eu nisl nunc. Commodo elit at imperdiet dui accumsan sit. Ullamcorper eget nulla facilisi etiam. Quam nulla porttitor massa id neque aliquam. Quisque non tellus orci ac auctor. Nunc non blandit massa enim nec dui. Condimentum lacinia quis vel eros donec."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">10</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document6.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">2</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Confidential"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Quam viverra orci sagittis eu volutpat odio facilisis. Mauris cursus mattis molestie a iaculis at erat pellentesque adipiscing. Dui accumsan sit amet nulla facilisi. Facilisis leo vel fringilla est ullamcorper eget nulla facilisi etiam. Tristique senectus et netus et malesuada fames ac turpis egestas. Donec adipiscing tristique risus nec feugiat in fermentum. Etiam erat velit scelerisque in dictum non consectetur. Aenean sed adipiscing diam donec. Aenean pharetra magna ac placerat vestibulum lectus mauris. Molestie a iaculis at erat pellentesque adipiscing. Interdum posuere lorem ipsum dolor sit. Facilisi morbi tempus iaculis urna id volutpat lacus laoreet non. Ac felis donec et odio pellentesque diam. Sociis natoque penatibus et magnis dis. Morbi enim nunc faucibus a pellentesque sit amet. Tellus in hac habitasse platea dictumst vestibulum rhoncus. Accumsan lacus vel facilisis volutpat est velit egestas dui id. Ultricies mi eget mauris pharetra et ultrices neque."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">11</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document7.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">3</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Secret"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Ipsum dolor sit amet consectetur. Tellus elementum sagittis vitae et. Eu sem integer vitae justo eget magna fermentum. Eget magna fermentum iaculis eu non diam phasellus vestibulum. Nisl suscipit adipiscing bibendum est ultricies integer. Habitant morbi tristique senectus et netus et malesuada. Ornare quam viverra orci sagittis eu volutpat odio. Enim eu turpis egestas pretium aenean. Elit ut aliquam purus sit amet. Diam maecenas sed enim ut. Felis imperdiet proin fermentum leo vel orci. Lacus vel facilisis volutpat est velit egestas dui id ornare. Fames ac turpis egestas integer eget aliquet nibh praesent. Aliquet bibendum enim facilisis gravida neque convallis a cras semper. Pretium quam vulputate dignissim suspendisse. A scelerisque purus semper eget duis at tellus."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">13</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document9.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">1</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Unclassified"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Lacus vestibulum sed arcu non. Consectetur purus ut faucibus pulvinar elementum. Turpis in eu mi bibendum. Ullamcorper morbi tincidunt ornare massa eget egestas purus viverra. Enim ut sem viverra aliquet eget sit amet tellus cras. Ut enim blandit volutpat maecenas volutpat blandit aliquam. Aliquam eleifend mi in nulla posuere sollicitudin aliquam. Molestie nunc non blandit massa. Mi sit amet mauris commodo quis imperdiet massa tincidunt nunc. Tincidunt dui ut ornare lectus sit amet est placerat in. Ultrices tincidunt arcu non sodales neque. Convallis tellus id interdum velit laoreet id donec ultrices. Risus feugiat in ante metus. Nisi scelerisque eu ultrices vitae auctor eu augue. At imperdiet dui accumsan sit. Non sodales neque sodales ut. Elit ut aliquam purus sit amet luctus venenatis lectus magna."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">14</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document10.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">2</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Confidential"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"In cursus turpis massa tincidunt dui ut ornare. Donec pretium vulputate sapien nec sagittis aliquam malesuada. Massa sed elementum tempus egestas sed sed. Et tortor at risus viverra adipiscing at in. Cursus risus at ultrices mi tempus imperdiet nulla malesuada. Sed faucibus turpis in eu mi bibendum neque egestas. Mauris pharetra et ultrices neque ornare aenean euismod elementum. Etiam non quam lacus suspendisse faucibus interdum posuere lorem ipsum. Et malesuada fames ac turpis egestas maecenas pharetra. Id venenatis a condimentum vitae sapien pellentesque. Interdum consectetur libero id faucibus. Nulla facilisi morbi tempus iaculis urna id volutpat. Ut etiam sit amet nisl purus in. Imperdiet nulla malesuada pellentesque elit."</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">15</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document11.txt"</span><span
+                class="token punctuation">,</span>
+        <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+            <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">3</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Secret"</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Pharetra magna ac placerat vestibulum lectus. Tellus pellentesque eu tincidunt tortor aliquam nulla facilisi cras fermentum. Interdum varius sit amet mattis vulputate enim nulla aliquet porttitor. Tincidunt praesent semper feugiat nibh sed pulvinar proin. Sollicitudin ac orci phasellus egestas tellus rutrum tellus pellentesque eu. Aliquam nulla facilisi cras fermentum. Tellus molestie nunc non blandit massa enim. Semper feugiat nibh sed pulvinar. Aliquet risus feugiat in ante metus dictum at tempor. Nisi quis eleifend quam adipiscing vitae proin sagittis. Cras adipiscing enim eu turpis egestas pretium aenean pharetra. Gravida quis blandit turpis cursus in hac habitasse platea. Neque vitae tempus quam pellentesque. Ipsum consequat nisl vel pretium lectus quam id leo. Lobortis elementum nibh tellus molestie nunc."</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">]</span>
+</code></pre>
+    <p><em><strong>Example:</strong> Get a specific document by its ID.</em></p>
+    <pre class=" language-bash"><code class="prism  language-bash">curl -X GET \
+  http://localhost:8080/documents/15 \
+  -H <span class="token string">'Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJzZWNyZXQudXNlckBlbWFpbC5jb20iLCJhdXRob3JpdGllcyI6WyJyZWFkQ29uZmlkZW50aWFsIiwicmVhZFNlY3JldCIsInJlYWRVbmNsYXNzaWZpZWQiLCJzZWNyZXRVc2VyIiwid3JpdGVTZWNyZXQiXSwiaWF0IjoxNTc2MjMwMTQ0LCJleHAiOjE1NzYzMTY1NDR9.1xkxklGauqqzmiPu_JenDYMRhh0EoEDcIeDQHxuO_NFbTL3DGgjN_nxyI0bwMxwqzzG-fINSN2ptk9dl8IlZyA'</span>
+</code></pre>
+    <p>Response:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">{</span>
+    <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">15</span><span class="token punctuation">,</span>
+    <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document11.txt"</span><span
+                class="token punctuation">,</span>
+    <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">3</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Secret"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"Pharetra magna ac placerat vestibulum lectus. Tellus pellentesque eu tincidunt tortor aliquam nulla facilisi cras fermentum. Interdum varius sit amet mattis vulputate enim nulla aliquet porttitor. Tincidunt praesent semper feugiat nibh sed pulvinar proin. Sollicitudin ac orci phasellus egestas tellus rutrum tellus pellentesque eu. Aliquam nulla facilisi cras fermentum. Tellus molestie nunc non blandit massa enim. Semper feugiat nibh sed pulvinar. Aliquet risus feugiat in ante metus dictum at tempor. Nisi quis eleifend quam adipiscing vitae proin sagittis. Cras adipiscing enim eu turpis egestas pretium aenean pharetra. Gravida quis blandit turpis cursus in hac habitasse platea. Neque vitae tempus quam pellentesque. Ipsum consequat nisl vel pretium lectus quam id leo. Lobortis elementum nibh tellus molestie nunc."</span>
+<span class="token punctuation">}</span>
+</code></pre>
+    <p><em><strong>Example:</strong> Get a document by its name.</em></p>
+    <pre class=" language-bash"><code class="prism  language-bash">curl -X GET \
+  -H <span class="token string">'Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJzZWNyZXQudXNlckBlbWFpbC5jb20iLCJhdXRob3JpdGllcyI6WyJyZWFkQ29uZmlkZW50aWFsIiwicmVhZFNlY3JldCIsInJlYWRVbmNsYXNzaWZpZWQiLCJzZWNyZXRVc2VyIiwid3JpdGVTZWNyZXQiXSwiaWF0IjoxNTc2MjMwMTQ0LCJleHAiOjE1NzYzMTY1NDR9.1xkxklGauqqzmiPu_JenDYMRhh0EoEDcIeDQHxuO_NFbTL3DGgjN_nxyI0bwMxwqzzG-fINSN2ptk9dl8IlZyA'</span>
+</code></pre>
+    <p>Response:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">{</span>
+    <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">14</span><span class="token punctuation">,</span>
+    <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Document10.txt"</span><span
+                class="token punctuation">,</span>
+    <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">2</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Confidential"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"In cursus turpis massa tincidunt dui ut ornare. Donec pretium vulputate sapien nec sagittis aliquam malesuada. Massa sed elementum tempus egestas sed sed. Et tortor at risus viverra adipiscing at in. Cursus risus at ultrices mi tempus imperdiet nulla malesuada. Sed faucibus turpis in eu mi bibendum neque egestas. Mauris pharetra et ultrices neque ornare aenean euismod elementum. Etiam non quam lacus suspendisse faucibus interdum posuere lorem ipsum. Et malesuada fames ac turpis egestas maecenas pharetra. Id venenatis a condimentum vitae sapien pellentesque. Interdum consectetur libero id faucibus. Nulla facilisi morbi tempus iaculis urna id volutpat. Ut etiam sit amet nisl purus in. Imperdiet nulla malesuada pellentesque elit."</span>
+<span class="token punctuation">}</span>
+</code></pre>
+    <p><em><strong>Example:</strong> Create a new document.</em></p>
+    <pre class=" language-bash"><code class="prism  language-bash">curl -X POST \
+  http://localhost:8080/documents/ \
+  -H <span class="token string">'Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJzZWNyZXQudXNlckBlbWFpbC5jb20iLCJhdXRob3JpdGllcyI6WyJyZWFkQ29uZmlkZW50aWFsIiwicmVhZFNlY3JldCIsInJlYWRVbmNsYXNzaWZpZWQiLCJzZWNyZXRVc2VyIiwid3JpdGVTZWNyZXQiXSwiaWF0IjoxNTc2MjMwMTQ0LCJleHAiOjE1NzYzMTY1NDR9.1xkxklGauqqzmiPu_JenDYMRhh0EoEDcIeDQHxuO_NFbTL3DGgjN_nxyI0bwMxwqzzG-fINSN2ptk9dl8IlZyA'</span> \
+  -H <span class="token string">'Content-Type: application/json'</span> \
+  -d <span class="token string">'{
+	"name": "New Test Document",
+	"label": {
+		"name": "Secret"
+	},
+	"contents": "This is a new test document."
+}'</span>
+</code></pre>
+    <p>Response:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">{</span>
+    <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">25</span><span class="token punctuation">,</span>
+    <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"New Test Document"</span><span
+                class="token punctuation">,</span>
+    <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">3</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Secret"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"This is a new test document."</span>
+<span class="token punctuation">}</span>
+</code></pre>
+    <p><em><strong>Example:</strong> Downgrade a document.</em></p>
+    <pre class=" language-bash"><code class="prism  language-bash">curl -X PUT \
+  http://localhost:8080/documents/25/downgrade \
+  -H <span class="token string">'Authorization: Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJzZWNyZXQuYWRtaW5AZW1haWwuY29tIiwiYXV0aG9yaXRpZXMiOlsiZG93bmdyYWRlU2VjcmV0IiwicmVhZENvbmZpZGVudGlhbCIsInJlYWRTZWNyZXQiLCJyZWFkVW5jbGFzc2lmaWVkIiwic2VjcmV0QWRtaW4iLCJzZWNyZXRVc2VyIiwidXBncmFkZUNvbmZpZGVudGlhbCIsIndyaXRlU2VjcmV0Il0sImlhdCI6MTU3NjIzMTQ5OSwiZXhwIjoxNTc2MzE3ODk5fQ.MYSBopu02sBIEYbVVF05csnE9vNbK79KK2NfqqOEiH_9t1TAkoPDbEEtxXsobd09y8c-Yn2Hf_Z2rKxVboZ2og'</span> \
+</code></pre>
+    <p>Response:</p>
+    <pre class=" language-json"><code class="prism  language-json"><span class="token punctuation">{</span>
+    <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">25</span><span class="token punctuation">,</span>
+    <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"New Test Document"</span><span
+                class="token punctuation">,</span>
+    <span class="token string">"label"</span><span class="token punctuation">:</span> <span
+                class="token punctuation">{</span>
+        <span class="token string">"id"</span><span class="token punctuation">:</span> <span
+                class="token number">2</span><span class="token punctuation">,</span>
+        <span class="token string">"name"</span><span class="token punctuation">:</span> <span class="token string">"Confidential"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"contents"</span><span class="token punctuation">:</span> <span class="token string">"This is a new test document."</span>
+<span class="token punctuation">}</span>
+</code></pre>
+    <h3 id="references">References</h3>
+    <ul>
+        <li><a href="https://www.baeldung.com/securing-a-restful-web-service-with-spring-security">Spring Security for a
+            REST API | Baeldung</a></li>
+        <li><a href="https://www.baeldung.com/role-and-privilege-for-spring-security-registration">Spring Security -
+            Roles and Privileges | Baeldung</a></li>
+        <li><a href="https://spring.io/guides/gs/accessing-data-jpa/">Getting Started · Accessing Data with JPA</a></li>
+        <li>
+            <a href="https://medium.com/omarelgabrys-blog/microservices-with-spring-boot-authentication-with-jwt-part-3-fafc9d7187e8">Microservices
+                with Spring Boot — Authentication with JWT (Part 3)</a></li>
+        <li><a href="https://loremipsum.io/generator/?n=12&amp;t=p">Lorem Ipsum Generator</a></li>
+    </ul>
+</div>
+</body>
+
+</html>
